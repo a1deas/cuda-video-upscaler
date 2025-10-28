@@ -18,6 +18,8 @@ Video and Image Upscaler built with **CUDA**.
 
 ## Chess Pattern Bicubic 4x Upscale - 2400x2400
 
+![screenshot](demo/bicubic_4x_chess.png)
+
 ## Next Steps
 - FFmpeg stdin/stdout
 - Video upscaling
