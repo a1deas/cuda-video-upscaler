@@ -2,19 +2,23 @@
 Video and Image Upscaler built with **CUDA**.
 
 ## Modes
-- Bilinear 2x
+- Bilinear
+- Bicubic
 
-## Chess Pattern Image 600x600
+## Features
+- Scale [2x | 4x]
+
+## Chess Pattern Original Image - 600x600
 
 ![screenshot](demo/chess.png)
 
-## Chess Pattern Image 1200x1200
+## Chess Pattern Bilinear 2x Upscale - 1200x1200
 
-![screenshot](demo/upscaled_chess.png)
+![screenshot](demo/bilinear_2x_chess.png)
+
+## Chess Pattern Bicubic 4x Upscale - 2400x2400
 
 ## Next Steps
-- Bicubic mode
-- Useful scale {2|4}
 - FFmpeg stdin/stdout
 - Video upscaling
 - NVDEC/NVENC

@@ -1,11 +1,46 @@
 #include <stb_image.h>
 #include <stb_image_write.h>
-#include <iostream>
-#include <vector> 
 #include <cuda_runtime.h>
+
+#include <iostream>
+#include <vector>
+#include <string>
+#include <stdexcept>
+
 #include "upscale_kernels.cuh"
 
-static void check(cudaError_t e, const char* where) {
+enum class Mode { Bilinear, Bicubic };
+
+struct Args {
+    std::string in, out;
+    int  scale = 2;          // 2 | 4
+    Mode mode  = Mode::Bilinear;
+};
+
+static Args parseArgs(int argc, char** argv) {
+    Args a;
+    if (argc < 3) {
+        throw std::runtime_error("Usage: video_upscaler <in.png> <out.png> [--mode bilinear|bicubic] [--scale 2|4]");
+    }
+    a.in  = argv[1];
+    a.out = argv[2];
+    for (int i = 3; i < argc; ++i) {
+        std::string s = argv[i];
+        if (s == "--mode" && i + 1 < argc) {
+            std::string v = argv[++i];
+            if      (v == "bilinear") a.mode = Mode::Bilinear;
+            else if (v == "bicubic")  a.mode = Mode::Bicubic;
+            else throw std::runtime_error("Unknown --mode");
+        } else if (s == "--scale" && i + 1 < argc) {
+            a.scale = std::stoi(argv[++i]);
+            if (a.scale != 2 && a.scale != 4)
+                throw std::runtime_error("Only scale=2 or 4 supported");
+        }
+    }
+    return a;
+}
+
+static inline void check(cudaError_t e, const char* where) {
     if (e != cudaSuccess) {
         std::cerr << where << ": " << cudaGetErrorString(e) << "\n";
         std::exit(1);
@@ -13,42 +48,58 @@ static void check(cudaError_t e, const char* where) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 3) {
-        std::cerr << "Usage: video_upscaler <input.png> <output.png>\n";
-        return 1;
+    Args args;
+    try { args = parseArgs(argc, argv); }
+    catch (const std::exception& ex) { std::cerr << ex.what() << "\n"; return 1; }
+
+    int width, height, nc;
+    unsigned char* img = stbi_load(args.in.c_str(), &width, &height, &nc, 3);
+    if (!img) { std::cerr << "Failed to load image: " << args.in << "\n"; return 1; }
+
+    const int dstWidth  = width  * args.scale;
+    const int dstHeight = height * args.scale;
+
+    // GPU alloc (pitch-aware)
+    unsigned char *dSrc = nullptr, *dDst = nullptr;
+    size_t srcPitchBytes = 0, dstPitchBytes = 0;
+    check(cudaMallocPitch(&dSrc, &srcPitchBytes, width*3,  height),  "cudaMallocPitch dSrc");
+    check(cudaMallocPitch(&dDst, &dstPitchBytes, dstWidth*3, dstHeight), "cudaMallocPitch dDst");
+
+    // H2D (row by row with pitch)
+    for (int y = 0; y < height; ++y) {
+        check(cudaMemcpy(dSrc + y*srcPitchBytes, img + y*width*3, width*3, cudaMemcpyHostToDevice), "H2D");
     }
-    int w,h,nc;
-    unsigned char* img = stbi_load(argv[1], &w, &h, &nc, 3);
-    if (!img) { std::cerr << "Failed to load image\n"; return 1; }
 
-    int dstW = w * 2, dstH = h * 2;
+    if (args.scale == 2) {
+        if (args.mode == Mode::Bilinear)
+            upscaler::bilinear2xRGB(dSrc, width, height, (int)srcPitchBytes, dDst, dstWidth, dstHeight, (int)dstPitchBytes);
+        else
+            upscaler::bicubic2xRGB (dSrc, width, height, (int)srcPitchBytes, dDst, dstWidth, dstHeight, (int)dstPitchBytes);
+    } else { // scale == 4 (2x + 2x) (MVP)
+        unsigned char *dMid = nullptr; size_t midPitch = 0;
+        check(cudaMallocPitch(&dMid, &midPitch, (width*2)*3, (height*2)), "cudaMallocPitch dMid");
 
-    // pitch-alloc
-    unsigned char *d_src=nullptr, *d_dst=nullptr;
-    size_t srcPitch=0, dstPitch=0;
-    check(cudaMallocPitch(&d_src, &srcPitch, w*3, h), "cudaMallocPitch d_src");
-    check(cudaMallocPitch(&d_dst, &dstPitch, dstW*3, dstH), "cudaMallocPitch d_dst");
-
-    // H2D
-    for (int y=0; y<h; ++y) {
-        check(cudaMemcpy(d_src + y*srcPitch, img + y*w*3, w*3, cudaMemcpyHostToDevice),
-              "cudaMemcpy H2D");
+        if (args.mode == Mode::Bilinear) {
+            upscaler::bilinear2xRGB(dSrc, width, height, (int)srcPitchBytes, dMid, width*2, height*2, (int)midPitch);
+            upscaler::bilinear2xRGB(dMid, width*2, height*2, (int)midPitch, dDst, dstWidth, dstHeight, (int)dstPitchBytes);
+        } else {
+            upscaler::bicubic2xRGB (dSrc, width, height, (int)srcPitchBytes, dMid, width*2, height*2, (int)midPitch);
+            upscaler::bicubic2xRGB (dMid, width*2, height*2, (int)midPitch, dDst, dstWidth, dstHeight, (int)dstPitchBytes);
+        }
+        cudaFree(dMid);
     }
-
-    upscaler::bilinear2x_rgb(d_src, w, h, (int)srcPitch,
-                             d_dst, dstW, dstH, (int)dstPitch);
 
     // D2H
-    std::vector<unsigned char> out(dstW*dstH*3);
-    for (int y=0; y<dstH; ++y) {
-        check(cudaMemcpy(out.data() + y*dstW*3, d_dst + y*dstPitch, dstW*3, cudaMemcpyDeviceToHost),
-              "cudaMemcpy D2H");
+    std::vector<unsigned char> out(dstWidth * dstHeight * 3);
+    for (int y = 0; y < dstHeight; ++y) {
+        check(cudaMemcpy(out.data() + y*dstWidth*3, dDst + y*dstPitchBytes, dstWidth*3, cudaMemcpyDeviceToHost), "D2H");
     }
 
-    stbi_write_png(argv[2], dstW, dstH, 3, out.data(), dstW*3);
+    stbi_write_png(args.out.c_str(), dstWidth, dstHeight, 3, out.data(), dstWidth*3);
 
-    cudaFree(d_src); cudaFree(d_dst);
+    cudaFree(dSrc); cudaFree(dDst);
     stbi_image_free(img);
-    std::cout << "Saved: " << argv[2] << "\n";
+
+    std::cout << "Saved: " << args.out << " (" << dstWidth << "x" << dstHeight << ")\n";
     return 0;
 }
