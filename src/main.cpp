@@ -8,19 +8,22 @@
 #include <stdexcept>
 
 #include "upscale_kernels.cuh"
+#include "upscale_cpu.hpp"
 
+enum class Device { CUDA, CPU };
 enum class Mode { Bilinear, Bicubic };
 
 struct Args {
     std::string in, out;
     int  scale = 2;          // 2 | 4
     Mode mode  = Mode::Bilinear;
+    Device device = Device::CUDA; // CPU | GPU(CUDA)
 };
 
 static Args parseArgs(int argc, char** argv) {
     Args a;
     if (argc < 3) {
-        throw std::runtime_error("Usage: video_upscaler <in.png> <out.png> [--mode bilinear|bicubic] [--scale 2|4]");
+        throw std::runtime_error("Usage: video_upscaler <in.png> <out.png> [--mode bilinear|bicubic] [--scale 2|4] [--device cuda|cpu]");
     }
     a.in  = argv[1];
     a.out = argv[2];
@@ -35,6 +38,13 @@ static Args parseArgs(int argc, char** argv) {
             a.scale = std::stoi(argv[++i]);
             if (a.scale != 2 && a.scale != 4)
                 throw std::runtime_error("Only scale=2 or 4 supported");
+        } else if (s == "--device" && i + 1 < argc) {
+            std::string v = argv[++i];
+            if      (v == "cuda") a.device = Device::CUDA;
+            else if (v == "cpu")  a.device = Device::CPU;
+            else throw std::runtime_error("Unknown --device (use cuda|cpu)");
+        } else {
+            throw std::runtime_error("Unknown argument: " + s);
         }
     }
     return a;
@@ -56,6 +66,33 @@ int main(int argc, char** argv) {
     unsigned char* img = stbi_load(args.in.c_str(), &width, &height, &nc, 3);
     if (!img) { std::cerr << "Failed to load image: " << args.in << "\n"; return 1; }
 
+    if (args.device == Device::CPU) {
+        // CPU 
+        const int dstW = width * args.scale;
+        const int dstH = height * args.scale;
+
+        std::vector<unsigned char> out(dstW * dstH * 3);
+
+        if (args.scale == 2) {
+            upscaler::bilinear2xRGB_CPU(
+                img, width, height,
+                out.data(), dstW, dstH);
+        } else if (args.scale == 4) {
+            // 2x + 2x (CPU)
+            std::vector<unsigned char> mid((size_t)(width*2) * (height*2) * 3);
+            upscaler::bilinear2xRGB_CPU(img, width, height, mid.data(), width*2, height*2);
+            upscaler::bilinear2xRGB_CPU(mid.data(), width*2, height*2, out.data(), dstW, dstH);
+        } else {
+            std::cerr << "CPU backend: scale must be 2 or 4.\n";
+            stbi_image_free(img);
+            return 1;
+        }
+
+        stbi_write_png(args.out.c_str(), dstW, dstH, 3, out.data(), dstW*3);
+        stbi_image_free(img);
+        std::cout << "Saved: " << args.out << " (" << dstW << "x" << dstH << ") [CPU]\n";
+        return 0;
+    }
     const int dstWidth  = width  * args.scale;
     const int dstHeight = height * args.scale;
 
