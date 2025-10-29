@@ -26,13 +26,13 @@ cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=C:/tools/vcpkg/scripts/buildsystems/v
 cmake --build build --config Release
 ```
 
-__Commands:__
+Commands Examples:
 ```bash
 # CPU 
 .\build\bin\Release\video_upscaler.exe imageIn.png .\imageOut.png --mode bilinear --scale 2 --device cpu
 
 # CUDA
-.\build\bin\Release\video_upscaler.exe imageIn.png .\imageOut.png --mode bilinear(or bicubic) --scale 2(or 4) --device cuda
+.\build\bin\Release\video_upscaler.exe imageIn.png .\imageOut.png --mode bicubi) --scale 4 --device cuda
 ```
 
 ## CLI Parametres 
@@ -40,7 +40,6 @@ __Commands:__
 --mode      bilinear/bicubic
 --scale     2/4
 --device    cpu/cuda
-
 ```
 
 ## Chess Pattern Original Image - 600x600
@@ -62,5 +61,5 @@ __Commands:__
 - Performance comparison between CPU and GPU and stats
 
 ## Tech: 
-> C++17, CUDA 13.0, CMake, stb_image, OpenMP
+C++17, CUDA 13.0, CMake, stb_image, OpenMP
 
