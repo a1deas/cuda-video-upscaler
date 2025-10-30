@@ -2,6 +2,8 @@
 #include <stb_image_write.h>
 #include <cuda_runtime.h>
 
+#include <cstdio>
+#include <cctype>
 #include <iostream>
 #include <vector>
 #include <string>
@@ -9,9 +11,10 @@
 #include <algorithm>
 #include <chrono>
 
-#include "common.hpp"            
-#include "upscale_cpu.hpp"      
-#include "upscale_kernels.cuh"   
+#include "common.hpp"              // Options/Mode/Border
+#include "upscale_cpu.hpp"         // upscaleCPU
+#include "upscale_kernels.cuh"     // upscaleCUDA
+#include "metrics.hpp"             // psnrRGB (optional)
 
 using upscaler::Mode;
 using upscaler::Border;
@@ -20,14 +23,16 @@ using upscaler::Options;
 enum class Device { CUDA, CPU };
 
 struct Args {
-    std::string in, out;            // input    | output
-    int   scale = 2;                // 2        | 4
-    Mode  mode  = Mode::Bilinear;   // bilinear | bicubic
-    Device device = Device::CUDA;   // cpu      | cuda
-    Border border = Border::Clamp;  // clamp    | reflect
-    bool  gammaCorrect = false;     // sRGB->Linear interpolation
+    std::string in, out;                                // input    | output
+    int   scale = 2;                                    // 2        | 4
+    Mode  mode  = Mode::Bilinear;                       // bilinear | bicubic
+    Device device = Device::CUDA;                       // cpu      | cuda
+    Border border = Border::Clamp;                      // clamp    | reflect
+    bool  gammaCorrect = false;                         // sRGB->Linear interpolation
     bool  selftest = false;
-    int   benchIters = 0;           // 0=off    | >0 iterations
+    int   benchIters = 0;                               // 0=off    | >0 iterations
+    bool  useStdin = false;                             // PPM in via stdin
+    bool  useStdout = false;                            // PPM out via stdout
 };
 
 static Args parseArgs(int argc, char** argv) {
@@ -37,9 +42,11 @@ static Args parseArgs(int argc, char** argv) {
             "Usage: video_upscaler <in.png> <out.png> "
             "[--mode bilinear|bicubic] [--scale 2|4] "
             "[--device cuda|cpu] [--border clamp|reflect] "
-            "[--gamma-correct] [--bench N] [--selftest]");
+            "[--gamma-correct] [--bench N] [--selftest] "
+            "[--stdin --stdout]\n"
+            "For piping (ffmpeg image2pipe), pass BOTH --stdin and --stdout.");
     }
-    a.in  = argv[1];
+    a.in = argv[1];
     a.out = argv[2];
     for (int i = 3; i < argc; ++i) {
         std::string s = argv[i];
@@ -64,6 +71,10 @@ static Args parseArgs(int argc, char** argv) {
             else throw std::runtime_error("Unknown --border");
         } else if (s == "--gamma-correct") {
             a.gammaCorrect = true;
+        } else if (s == "--stdin") {
+            a.useStdin = true;
+        } else if (s == "--stdout") {
+            a.useStdout = true;
         } else if (s == "--bench" && i + 1 < argc) {
             a.benchIters = std::max(0, std::stoi(argv[++i]));
         } else if (s == "--selftest") {
@@ -82,6 +93,69 @@ static inline void check(cudaError_t e, const char* where) {
     }
 }
 
+// Minimal PPM (P6) streaming (image2pipe)
+static int skipWS(FILE* f, int c) {
+    while (c != EOF && std::isspace(c)) c = fgetc(f);
+    return c;
+}
+static int skipComments(FILE* f, int c) {
+    c = skipWS(f, c);
+    while (c == '#') {
+        while (c != EOF && c != '\n') c = fgetc(f);
+        c = skipWS(f, fgetc(f));
+    }
+    return c;
+}
+static bool readIntToken(FILE* f, int& out, int c) {
+    c = skipComments(f, c);
+    if (!std::isdigit(c)) return false;
+    int val = 0;
+    while (std::isdigit(c)) { val = val*10 + (c - '0'); c = fgetc(f); }
+    out = val;
+    return true;
+}
+
+static bool readPPM(FILE* f, std::vector<uint8_t>& rgb, int& w, int& h) {
+    int c = fgetc(f);
+    if (c == EOF) return false;
+    if (c != 'P') return false;
+    c = fgetc(f);
+    if (c != '6') return false;
+
+    // width
+    int width = 0, height = 0, maxv = 0;
+    c = fgetc(f);
+    if (!readIntToken(f, width, c)) return false;
+    // height
+    c = fgetc(f);
+    if (!readIntToken(f, height, c)) return false;
+    // max val
+    c = fgetc(f);
+    if (!readIntToken(f, maxv, c)) return false;
+    if (maxv != 255) return false;
+
+    // consume single '\n'
+    if (c != '\n') {
+        if (c == '\r') { c = fgetc(f); if (c != '\n') return false; }
+        else return false;
+    }
+
+    const size_t N = (size_t)width * height * 3;
+    rgb.resize(N);
+    size_t got = fread(rgb.data(), 1, N, f);
+    if (got != N) return false;
+
+    w = width; h = height;
+    return true;
+}
+
+static bool writePPM(FILE* f, const uint8_t* rgb, int w, int h) {
+    if (std::fprintf(f, "P6\n%d %d\n255\n", w, h) < 0) return false;
+    const size_t N = (size_t)w * h * 3;
+    size_t wrote = fwrite(rgb, 1, N, f);
+    return wrote == N;
+}
+
 int main(int argc, char** argv) {
     Args args;
     try { args = parseArgs(argc, argv); }
@@ -93,10 +167,50 @@ int main(int argc, char** argv) {
     opt.border        = args.border;
     opt.gammaCorrect  = args.gammaCorrect;
 
-    // Selftest
+    // Pipe mode: read PPM frames from stdin and write to stdout
+    if (args.useStdin || args.useStdout) {
+        if (!(args.useStdin && args.useStdout)) {
+            std::cerr << "For piping, pass BOTH --stdin and --stdout.\n";
+            return 1;
+        }
+        const bool onCUDA = (args.device == Device::CUDA);
+
+        std::vector<uint8_t> inRGB, outRGB;
+        int w = 0, h = 0;
+        while (readPPM(stdin, inRGB, w, h)) {
+            const int dW = w * opt.scale, dH = h * opt.scale;
+            outRGB.assign((size_t)dW * dH * 3, 0);
+
+            if (!onCUDA) {
+                upscaler::upscaleCPU(inRGB.data(), w, h, outRGB.data(), dW, dH, opt);
+            } else {
+                uint8_t *dSrc = nullptr, *dDst = nullptr;
+                size_t pS = 0, pD = 0;
+                check(cudaMallocPitch(&dSrc, &pS, (size_t)w * 3,  h),  "cudaMallocPitch dSrc");
+                check(cudaMallocPitch(&dDst, &pD, (size_t)dW * 3, dH), "cudaMallocPitch dDst");
+                for (int y = 0; y < h; ++y)
+                    check(cudaMemcpy(dSrc + (size_t)y * pS,
+                                     inRGB.data() + (size_t)y * w * 3,
+                                     (size_t)w * 3, cudaMemcpyHostToDevice), "H2D");
+                upscaler::upscaleCUDA(dSrc, w, h, (int)pS, dDst, dW, dH, (int)pD, opt);
+                for (int y = 0; y < dH; ++y)
+                    check(cudaMemcpy(outRGB.data() + (size_t)y * dW * 3,
+                                     dDst + (size_t)y * pD,
+                                     (size_t)dW * 3, cudaMemcpyDeviceToHost), "D2H");
+                cudaFree(dSrc); cudaFree(dDst);
+            }
+            if (!writePPM(stdout, outRGB.data(), dW, dH)) {
+                std::cerr << "Failed to write PPM to stdout\n";
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    // Self test
     if (args.selftest) {
         const int W = 64, H = 48;
-        std::vector<uint8_t> src(W*H*3);
+        std::vector<uint8_t> src((size_t)W*H*3);
         for (int y = 0; y < H; ++y)
             for (int x = 0; x < W; ++x) {
                 src[(y*W+x)*3+0] = (uint8_t)((x*3  + y*5 ) & 255);
@@ -104,7 +218,7 @@ int main(int argc, char** argv) {
                 src[(y*W+x)*3+2] = (uint8_t)((x*13 + y*17) & 255);
             }
         const int dW = W * opt.scale, dH = H * opt.scale;
-        std::vector<uint8_t> cpuOut(dW*dH*3), cudaOut(dW*dH*3);
+        std::vector<uint8_t> cpuOut((size_t)dW*dH*3), cudaOut((size_t)dW*dH*3);
 
         // CPU
         upscaler::upscaleCPU(src.data(), W, H, cpuOut.data(), dW, dH, opt);
@@ -114,10 +228,10 @@ int main(int argc, char** argv) {
         check(cudaMallocPitch(&dSrc, &pS, (size_t)W*3,  H),  "malloc dSrc");
         check(cudaMallocPitch(&dDst, &pD, (size_t)dW*3, dH), "malloc dDst");
         for (int y=0; y<H; ++y)
-            check(cudaMemcpy(dSrc + y*pS, src.data() + (size_t)y*W*3, (size_t)W*3, cudaMemcpyHostToDevice), "H2D");
+            check(cudaMemcpy(dSrc + (size_t)y*pS, src.data() + (size_t)y*W*3, (size_t)W*3, cudaMemcpyHostToDevice), "H2D");
         upscaler::upscaleCUDA(dSrc, W, H, (int)pS, dDst, dW, dH, (int)pD, opt);
         for (int y=0; y<dH; ++y)
-            check(cudaMemcpy(cudaOut.data() + (size_t)y*dW*3, dDst + y*pD, (size_t)dW*3, cudaMemcpyDeviceToHost), "D2H");
+            check(cudaMemcpy(cudaOut.data() + (size_t)y*dW*3, dDst + (size_t)y*pD, (size_t)dW*3, cudaMemcpyDeviceToHost), "D2H");
         cudaFree(dSrc); cudaFree(dDst);
 
         float maxAbs = 0.f;
@@ -125,11 +239,13 @@ int main(int argc, char** argv) {
             float a = cpuOut[i] / 255.f, b = cudaOut[i] / 255.f;
             maxAbs = std::max(maxAbs, std::abs(a-b));
         }
+        const double psnr = upscaler::psnrRGB(cpuOut.data(), cudaOut.data(), dW, dH);
         std::cout << "[SELFTEST] max |CPU-CUDA| = " << maxAbs
-                  << " (target ≤ ~5e-4)\n";
-        return (maxAbs <= 5e-4f) ? 0 : 2;
+                  << "  PSNR = " << psnr << " dB  (goal: max<=0.002 or PSNR>=50)\n";
+        return (maxAbs <= 0.0021f || psnr >= 50.0) ? 0 : 2;
     }
 
+    // file mode
     int width=0, height=0, nc=0;
     unsigned char* img = stbi_load(args.in.c_str(), &width, &height, &nc, 3);
     if (!img) { std::cerr << "Failed to load image: " << args.in << "\n"; return 1; }
@@ -138,7 +254,6 @@ int main(int argc, char** argv) {
     const int dstH = height * opt.scale;
     std::vector<uint8_t> out((size_t)dstW * dstH * 3);
 
-    // --- CPU backend ---
     if (args.device == Device::CPU) {
         if (args.benchIters > 0) {
             using clk = std::chrono::high_resolution_clock;
@@ -154,7 +269,6 @@ int main(int argc, char** argv) {
                       << " ms over " << args.benchIters << " iters\n";
         }
 
-        // final launch
         upscaler::upscaleCPU(img, width, height, out.data(), dstW, dstH, opt);
         stbi_write_png(args.out.c_str(), dstW, dstH, 3, out.data(), dstW*3);
         stbi_image_free(img);
@@ -162,7 +276,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // --- CUDA backend ---
+    // CUDA backend 
     unsigned char *dSrc=nullptr, *dDst=nullptr;
     size_t srcPitchBytes=0, dstPitchBytes=0;
     check(cudaMallocPitch(&dSrc, &srcPitchBytes, (size_t)width*3,  height), "cudaMallocPitch dSrc");

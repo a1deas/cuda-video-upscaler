@@ -14,7 +14,7 @@ namespace upscaler {
 static inline int clampi(int v, int lo, int hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
-// Border type: Reflect
+// Border type: reflect
 static inline int reflectIndex(int i, int n) {
     if (n <= 1) return 0;
     int p = 2*(n-1);
@@ -69,8 +69,8 @@ static void bilinear2xRGB_CPU(
             const int   ix    = int(std::floor(srcXf));
             const float fx    = srcXf - ix;
 
-            const int ix0 = borderIdx(ix, srcWidth, border);
-            const int ix1 = borderIdx(ix+1, srcWidth, border);
+            const int ix0 = borderIdx(ix,     srcWidth, border);
+            const int ix1 = borderIdx(ix + 1, srcWidth, border);
 
             const uint8_t* p00 = row0 + ix0 * 3;
             const uint8_t* p10 = row0 + ix1 * 3;
@@ -89,13 +89,13 @@ static void bilinear2xRGB_CPU(
                 if (gamma) {
                     v00 = srgb2lin(v00/255.f); v10 = srgb2lin(v10/255.f);
                     v01 = srgb2lin(v01/255.f); v11 = srgb2lin(v11/255.f);
-                    float lin = w00*v00 + w10*v10 + w01*v01 + w11*v11;
-                    float s = lin2srgb(std::clamp(lin, 0.f, 1.f));
-                    int out = (int)std::lround(s*255.f);
+                    const float lin = w00 * v00 + w10 * v10 + w01 * v01 + w11 * v11;
+                    const float s   = lin2srgb(std::clamp(lin, 0.f, 1.f));
+                    const int out   = (int)std::lround(s * 255.f);
                     dp[c] = (uint8_t)std::clamp(out, 0, 255);
                 } else {
-                    float s = w00*v00 + w10*v10 + w01*v01 + w11*v11;
-                    int out = (int)std::lround(s);
+                    const float s = w00*v00 + w10*v10 + w01*v01 + w11*v11;
+                    const int out = (int)std::lround(s);
                     dp[c] = (uint8_t)std::clamp(out, 0, 255);
                 }
             }
@@ -154,9 +154,9 @@ static void bicubic2xRGB_CPU(
                     const uint8_t* p = r + xs[i]*3;
                     const float w = wyj * wx[i];
                     if (gamma){
-                        float r0 = srgb2lin(p[0]/255.f);
-                        float g0 = srgb2lin(p[1]/255.f);
-                        float b0 = srgb2lin(p[2]/255.f);
+                        const float r0 = srgb2lin(p[0]/255.f);
+                        const float g0 = srgb2lin(p[1]/255.f);
+                        const float b0 = srgb2lin(p[2]/255.f);
                         sum[0] += w*r0; sum[1] += w*g0; sum[2] += w*b0;
                     } else {
                         sum[0] += w*p[0]; sum[1] += w*p[1]; sum[2] += w*p[2];
@@ -166,13 +166,13 @@ static void bicubic2xRGB_CPU(
             uint8_t* dp = drow + x*3;
             if (gamma){
                 for (int c=0;c<3;++c){
-                    float s = lin2srgb(std::clamp(sum[c], 0.f, 1.f));
-                    int out = (int)std::lround(s*255.f);
+                    const float s = lin2srgb(std::clamp(sum[c], 0.f, 1.f));
+                    const int out = (int)std::lround(s * 255.f);
                     dp[c] = (uint8_t)std::clamp(out, 0, 255);
                 }
             } else {
                 for (int c=0;c<3;++c){
-                    int out = (int)std::lround(sum[c]);
+                    const int out = (int)std::lround(sum[c]);
                     dp[c] = (uint8_t)std::clamp(out, 0, 255);
                 }
             }

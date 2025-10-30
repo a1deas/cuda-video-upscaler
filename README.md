@@ -12,8 +12,10 @@ Demonstrates CUDA memory handling (pitched allocations, kernel launches) and CPU
 - 2x/4x scaling with high-quality interpolation
 - Bilinear or Bicubic filters
 - Gamma-correct interpolation(sRGB <-> Linear)
-- Benchmark mode
-
+- Benchmarks: `--bench N` (ms/iter)
+- Optional OpenMP
+- Clamp and Reflect borders
+- `ffmpeg` pite via PPM `--stdin/--stdout`
 
 ## Building:
 Requirements:
@@ -38,13 +40,15 @@ Commands Examples:
 
 ## CLI Parametres 
 ```text
---mode          bilinear/bicubic
---scale         2/4
---device        cpu/cuda
---border        clamp/reflect
---gamma-correct true/false
---bench N       benchmark for N iterations
---selftest      Run automatic CPU/GPU parity test
+--mode              bilinear/bicubic
+--scale             2/4
+--device            cpu/cuda
+--border            clamp/reflect
+--gamma-correct     true/false
+--bench <N>         benchmark for N iterations
+--selftest          Run automatic CPU/GPU parity test
+--stdin             Read via PPM stdin(P6)
+--stdout            Write via PPM stdout(P6)
 ```
 
 ## Chess Pattern Original Image - 600x600
@@ -63,6 +67,9 @@ Commands Examples:
 - FFmpeg stdin/stdout
 - Video upscaling
 - NVDEC/NVENC
+- Texture Objects / CUDA surface reads
+- Bench Tables(720p/1080p/1440p, 2x/4x, ms/frame and MPix/s)
+- Autotest Package, PSNR/SSIM report
 
 ## Tech: 
 C++17, CUDA 13.0, CMake, stb_image, OpenMP
