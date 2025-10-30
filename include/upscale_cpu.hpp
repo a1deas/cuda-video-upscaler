@@ -1,14 +1,12 @@
 #pragma once
 #include <cstdint>
+#include "common.hpp"
 
 // CPU upscale realization
 namespace upscaler {
 
-    void bilinear2xRGB_CPU(
-    const uint8_t* src, int srcWidth, int srcHeight, 
-    uint8_t* dst, int dstWidth, int dstHeight);
-
-void bicubic2xRGB_CPU(
+void upscaleCPU(
     const uint8_t* src, int srcWidth, int srcHeight,
-    uint8_t* dst, int dstWidth, int dstHeight);
+    uint8_t* dst, int dstWidth, int dstHeight,
+    const Options& options);
 } // namespace upscaler
